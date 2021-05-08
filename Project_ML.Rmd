@@ -1,0 +1,228 @@
+---
+title: "project_ML"
+author: "Yaojie Wang, Jianan Zhu"
+date: "3/14/2021"
+output: pdf_document
+---
+
+```{r include = F}
+library(ISLR)
+library(randomForest)
+library(tree) #tree
+library(tidyverse)
+library(corrplot)
+#library(pROC)
+```
+
+# Steps
+
+(1) Import data
+(2) Check missing values
+(3) Change diagnosis results from "M" and "B" to 1 and 0
+(4) Check correlation among variables
+(5) Conduct pca to reduce variables and correlation
+(6) Get data with only reduced variables 
+(7) Divide data into training and test data
+
+## import data 
+
+```{r}
+bc <- read.csv("data.csv")
+```
+
+```{r}
+bc <- bc %>% 
+  select(-c(X, id)) # delete a blank column and id in the original data
+```
+
+## data cleaning
+
+```{r}
+#transforming the target variable(diagnosis) as M==1 and B==0
+bc$diagnosis <- ifelse(bc$diagnosis == 'M', 1, 0)
+bc$diagnosis <- as.factor(bc$diagnosis)
+```
+
+```{r}
+head(bc)
+dim(bc)
+sum(is.na(bc)) # check if there are missing values
+```
+
+There is no missing value in this data. 
+
+## correlation
+
+```{r}
+X=bc[,-c(1)] ## except "diagnosis"
+corrplot(cor(X)) 
+```
+
+The plot shows high correlation among variables, and this can lead to skewed or misleading results for Logistic Regression, so we conduct pca to reduce variable and correlation
+
+## feature selection: pca 
+
+```{r}
+pca <- prcomp(bc[,c(2:31)], scale = T)
+summary(pca)
+```
+
+we can see that pc10 can explan 95% of the results
+
+```{r}
+## get the name of the top 10 predictors that contribute
+## most to pc1.
+loading_scores <- pca$rotation[,1]
+bc_scores <- abs(loading_scores) ## get the magnitudes
+bc_score_ranked <- sort(bc_scores, decreasing=TRUE)
+top_10_bc <- names(bc_score_ranked[1:10])
+ 
+top_10_bc ## show the names of the top 10 variables
+```
+
+## get data with only reduced variables 
+
+```{r}
+bc1 <- bc # for random forests
+```
+
+```{r}
+bc <- bc %>% 
+  select( diagnosis,concave.points_mean, concavity_mean, concave.points_worst,compactness_mean, perimeter_worst,concavity_worst,
+radius_worst, perimeter_mean, area_worst, area_mean)
+```
+
+```{r}
+head(bc)
+```
+
+## set training and test dataset 
+
+```{r}
+set.seed(2)
+nrow(bc)
+train <- sample(1:569, 300)
+test <- bc[-train,]
+```
+
+## logistic regression
+
+```{r warning=FALSE}
+#fit a full model
+mod <- glm(diagnosis ~ ., data = bc, subset = train, family = "binomial")
+```
+
+```{r warning=FALSE}
+step(mod)
+```
+
+```{r}
+library("ROCR")
+# fit the final model after aic
+glm.fit <- glm(diagnosis ~ concave.points_mean + compactness_mean + 
+    concavity_worst + area_worst + area_mean, family = "binomial", 
+    data = bc, subset = train)
+glm.prob <- predict(object = glm.fit, test, type = 'response')
+pred <- prediction(glm.prob, test$diagnosis)
+perf <- performance(pred,"tpr","fpr")
+plot(perf)
+```
+
+```{r}
+auc.perf <- performance(pred, measure = "auc")
+print(auc.perf@y.values)
+```
+
+```{r include=FALSE}
+# another method to plot auc 
+#par(pty = "s")
+#roc(test$diagnosis, glm.prob, plot=TRUE, legacy.axes=TRUE,  col="#377eb8", lwd=4)
+```
+
+```{r}
+glm.pred = ifelse(glm.prob> 0.5, '1', '0')
+mean(glm.pred == test$diagnosis)
+table(glm.pred, test$diagnosis)
+```
+
+## random forest 
+
+```{r}
+# Random Forest
+set.seed(2)
+rf.bc <- randomForest(diagnosis ~ ., data = bc, subset = train, ntree = 500)
+rf.bc
+```
+
+### dataframe format the error rate 
+
+```{r}
+oob.error.data <- data.frame(
+  Trees = rep(1:nrow(rf.bc$err.rate), times = 3),
+  Type = rep(c("OOB","0","1"), each = nrow(rf.bc$err.rate)),
+  Error = c(rf.bc$err.rate[,"OOB"],
+            rf.bc$err.rate[,"0"],
+            rf.bc$err.rate[,"1"])
+)
+```
+
+### error rate visualization
+
+```{r}
+ggplot(data = oob.error.data, aes(x = Trees, y = Error)) + 
+  geom_line(aes(color = Type))
+```
+
+### number of variables
+
+Then we create a loop that tests different numbers of variables at each step
+
+```{r}
+set.seed(2)
+oob.values <- vector(length = 10)
+for(i in 1:10){
+  temp.rf <- randomForest(diagnosis ~ ., data = bc, subset = train, mtry = i, ntree = 1000 )
+  oob.values[i] <- temp.rf$err.rate[nrow(temp.rf$err.rate),1]
+}
+```
+
+```{r}
+oob.values
+```
+
+```{r}
+# refit model with best argument mtry = 4
+set.seed(2)
+rf.bc <- randomForest(diagnosis ~ ., data = bc, subset = train, ntree = 500, mtry = 4, proximity = TRUE)
+rf.bc
+```
+
+### prediction 
+
+```{r}
+yhat.rf <- predict(rf.bc, newdata = test)
+mean(yhat.rf==test$diagnosis)
+table(yhat.rf, test$diagnosis)
+```
+
+
+```{r}
+varImpPlot(rf.bc)
+```
+
+```{r}
+glm.prob <- as.numeric(predict(object = rf.bc, test, type = 'response'))
+pred <- prediction(glm.prob, test$diagnosis)
+perf <- performance(pred,"tpr","fpr")
+plot(perf)
+auc.perf <- performance(pred, measure = "auc")
+print(auc.perf@y.values)
+```
+
+
+
+## reference
+
+https://github.com/StatQuest/pca_demo/blob/master/pca_demo.R
+
+(https://www.kaggle.com/jaehoonmoon/pca-logistic-regression-auc-99)
